@@ -424,20 +424,55 @@ SENSOR_HTML = """
 </div>
 
 <script>
-const DISTRESS_WORDS   = ['help','stop','no','please','emergency','danger',
-                          'let go','fire','assault','call police'];
+// FIX 1: Expanded distress word list — single-syllable words like "help" are
+// easier for speech recognition to catch reliably.
+const DISTRESS_WORDS = [
+  'help', 'tolong', 'tulong',          // universal + Malay/Filipino
+  'stop', 'no', 'don\'t', 'dont',
+  'please', 'please help',
+  'emergency', 'danger', 'danger help',
+  'let go', 'let me go', 'leave me',
+  'fire', 'fire help',
+  'assault', 'attack', 'attacking',
+  'call police', 'call 911', 'call 999',
+  'somebody help', 'someone help',
+  'save me', 'i need help',
+  'get away', 'go away'
+];
 const MOTION_THRESHOLD = 15;
 
 let audioCtx = null, analyser = null, waveData = null;
 let micOn = false, recognition = null;
 
+// FIX 2: Use postMessage to pass trigger data to the parent Streamlit window.
+// sessionStorage is sandboxed per-iframe and is NOT readable by the parent —
+// this was silently failing every time.
 function setTrigger(type, value) {
     try {
+        // Write to our own sessionStorage (for local display)
         sessionStorage.setItem('emergency_' + type, JSON.stringify({
             value: value,
             ts: Date.now()
         }));
     } catch(e) {}
+    // Also broadcast to parent window so Streamlit can read it
+    try {
+        window.parent.postMessage({
+            type: 'emergency_trigger',
+            triggerType: type,
+            value: value,
+            ts: Date.now()
+        }, '*');
+    } catch(e) {}
+    // FIX 3: Also write to parent sessionStorage directly if same origin
+    try {
+        window.parent.sessionStorage.setItem('emergency_' + type, JSON.stringify({
+            value: value,
+            ts: Date.now()
+        }));
+    } catch(e) {
+        // Cross-origin — postMessage above is the fallback
+    }
 }
 
 function setBox(id, barId, pct, level) {
@@ -519,13 +554,27 @@ function startSpeech() {
   recognition = new SR();
   recognition.continuous     = true;
   recognition.interimResults = true;
-  recognition.lang           = 'en-US';
+  // FIX 4: Use device locale so the engine is already warm;
+  // 'en-US' can mis-transcribe accented speech. We try device lang first,
+  // fall back to en-US.
+  recognition.lang = navigator.language || 'en-US';
+
   recognition.onresult = function(e) {
     var t = '';
     for (var i = e.resultIndex; i < e.results.length; i++)
       t += e.results[i][0].transcript.toLowerCase();
     document.getElementById('transcriptBox').textContent = 'Heard: "' + t + '"';
-    var found = DISTRESS_WORDS.find(function(w) { return t.includes(w); });
+
+    // FIX 5: Check every word individually so partial matches work
+    // e.g. "help me please" contains "help" — this works.
+    var found = null;
+    for (var w = 0; w < DISTRESS_WORDS.length; w++) {
+      if (t.indexOf(DISTRESS_WORDS[w]) !== -1) {
+        found = DISTRESS_WORDS[w];
+        break;
+      }
+    }
+
     if (found) {
       document.getElementById('transcriptBox').innerHTML =
         '<span style="color:#ff1a1a;font-weight:600">⚠ DISTRESS: "' + found + '"</span>';
@@ -533,13 +582,38 @@ function startSpeech() {
       setTrigger('voice', found);
     }
   };
+
+  // FIX 6: Log ALL speech errors visibly so you can debug on device
   recognition.onerror = function(e) {
-    if (e.error !== 'no-speech') console.warn('Speech:', e.error);
+    var msg = e.error;
+    if (msg === 'no-speech') return; // normal silence, ignore
+    if (msg === 'not-allowed') {
+      document.getElementById('transcriptBox').innerHTML =
+        '<span style="color:#ff1a1a">⚠ Mic permission denied. Enable in browser settings.</span>';
+    } else if (msg === 'network') {
+      document.getElementById('transcriptBox').innerHTML =
+        '<span style="color:#ff8c00">⚠ Speech API needs internet connection.</span>';
+    } else {
+      document.getElementById('transcriptBox').innerHTML =
+        '<span style="color:#ff8c00">⚠ Speech error: ' + msg + '</span>';
+    }
+    console.warn('SpeechRecognition error:', msg);
   };
+
   recognition.onend = function() {
-    if (micOn) setTimeout(function() { recognition && recognition.start(); }, 500);
+    if (micOn) setTimeout(function() {
+      if (recognition) {
+        try { recognition.start(); } catch(e) {}
+      }
+    }, 300);
   };
-  recognition.start();
+
+  try {
+    recognition.start();
+  } catch(e) {
+    document.getElementById('transcriptBox').innerHTML =
+      '<span style="color:#ff8c00">⚠ Could not start speech: ' + e.message + '</span>';
+  }
 }
 
 function startMotion() {
@@ -575,8 +649,31 @@ function startMotion() {
 
 components.html(SENSOR_HTML, height=295, scrolling=False)
 
-# Read auto-detect signals from main page
-voice_data_raw = streamlit_js_eval(js_expressions="sessionStorage.getItem('emergency_voice')", key="get_voice")
+# ── Listen for postMessage events from the sensor iframe ──────────────────────
+# The iframe's sessionStorage is sandboxed (not readable by parent).
+# We inject a listener on the PARENT window that catches postMessage from the
+# iframe and writes it into the PARENT sessionStorage, which Streamlit CAN read.
+streamlit_js_eval(js_expressions="""
+(function() {
+    if (window._triggerListenerStarted) return true;
+    window._triggerListenerStarted = true;
+    window.addEventListener('message', function(e) {
+        try {
+            var d = e.data;
+            if (d && d.type === 'emergency_trigger') {
+                sessionStorage.setItem('emergency_' + d.triggerType, JSON.stringify({
+                    value: d.value,
+                    ts: d.ts || Date.now()
+                }));
+            }
+        } catch(err) {}
+    });
+    return true;
+})()
+""", key="setup_trigger_listener")
+
+# Read auto-detect signals — now reliably written by the postMessage listener above
+voice_data_raw  = streamlit_js_eval(js_expressions="sessionStorage.getItem('emergency_voice')",  key="get_voice")
 motion_data_raw = streamlit_js_eval(js_expressions="sessionStorage.getItem('emergency_motion')", key="get_motion")
 
 # Parse triggers
