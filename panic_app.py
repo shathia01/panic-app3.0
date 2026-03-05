@@ -427,17 +427,17 @@ SENSOR_HTML = """
 // FIX 1: Expanded distress word list — single-syllable words like "help" are
 // easier for speech recognition to catch reliably.
 const DISTRESS_WORDS = [
-  'help', 'tolong', 'tulong',          // universal + Malay/Filipino
-  'stop', 'no', 'don\'t', 'dont',
-  'please', 'please help',
-  'emergency', 'danger', 'danger help',
-  'let go', 'let me go', 'leave me',
-  'fire', 'fire help',
-  'assault', 'attack', 'attacking',
-  'call police', 'call 911', 'call 999',
-  'somebody help', 'someone help',
-  'save me', 'i need help',
-  'get away', 'go away'
+  "help", "tolong", "tulong",
+  "stop", "no", "dont", "don't",
+  "please", "please help",
+  "emergency", "danger",
+  "let go", "let me go", "leave me",
+  "fire",
+  "assault", "attack", "attacking",
+  "call police", "call 911", "call 999",
+  "somebody help", "someone help",
+  "save me", "i need help",
+  "get away", "go away"
 ];
 const MOTION_THRESHOLD = 15;
 
