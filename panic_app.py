@@ -2,135 +2,83 @@ import streamlit as st
 import requests
 import math
 import smtplib
-import time
 import json
+import time
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formatdate, make_msgid
-import streamlit.components.v1 as components
 from streamlit_js_eval import streamlit_js_eval
 
-st.set_page_config(
-    page_title="Emergency Shield",
-    layout="centered",
-    initial_sidebar_state="collapsed"
-)
+st.title("🚨 One-Click Emergency Panic Button")
 
-# ==============================
-# STYLING
-# ==============================
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
+# ---------- GMAIL CONFIG ----------
+SENDER_EMAIL = st.secrets["SENDER_EMAIL"]
+SENDER_APP_PASSWORD = st.secrets["SENDER_APP_PASSWORD"]
+SENDER_NAME = "Emergency Alert"
 
-html, body, [class*="css"] {
-    font-family: 'IBM Plex Sans', sans-serif;
-    background-color: #0a0a0f !important;
-    color: #e8e8f0 !important;
-}
-.stApp { background-color: #0a0a0f !important; }
-h1, h2, h3 {
-    font-family: 'Bebas Neue', sans-serif !important;
-    letter-spacing: 2px !important;
-}
-.stButton > button {
-    font-family: 'Bebas Neue', sans-serif !important;
-    font-size: 22px !important;
-    letter-spacing: 3px !important;
-    border-radius: 8px !important;
-    border: none !important;
-    padding: 16px !important;
-    transition: all 0.2s !important;
-}
-.stButton > button[kind="primary"] {
-    background: #ff1a1a !important;
-    color: white !important;
-    box-shadow: 0 0 20px rgba(255,26,26,0.3) !important;
-}
-.stButton > button[kind="secondary"] {
-    background: transparent !important;
-    border: 2px solid #ff1a1a !important;
-    color: #ff1a1a !important;
-}
-.extreme-banner {
-    background: #b30000;
-    border: 1px solid #ff1a1a;
-    border-radius: 8px;
-    padding: 14px 16px;
-    margin-bottom: 16px;
-    animation: pulse 1s ease-in-out infinite;
-    font-family: 'Bebas Neue', sans-serif;
-    font-size: 20px;
-    letter-spacing: 2px;
-    color: white;
-}
-@keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.7;} }
-.log-box {
-    background: #12121a;
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 8px;
-    padding: 12px;
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 11px;
-    max-height: 160px;
-    overflow-y: auto;
-    margin-bottom: 16px;
-}
-.stAlert { border-radius: 8px !important; }
-</style>
-""", unsafe_allow_html=True)
+# ---------- DISTRESS KEYWORDS ----------
+DISTRESS_KEYWORDS = [
+    "help", "please", "leave me", "stop", "let me go",
+    "get away", "don't touch me", "call police", "save me",
+    "emergency", "danger", "scared"
+]
 
-# ==============================
-# CONFIG — UPDATE THESE
-# ==============================
-SENDER_EMAIL        = "shathia190304@gmail.com"
-SENDER_APP_PASSWORD = "kvskirvfdhsscege"  # <-- Replace with Gmail App Password
-SENDER_NAME         = "Emergency Alert"
-
+# ---------- DEFAULT HARDCODED CONTACTS ----------
 DEFAULT_CONTACTS = [
     {"name": "Admin", "email": "shathia190304@gmail.com"},
 ]
 
-# ==============================
-# SESSION STATE
-# ==============================
-defaults = {
-    "extreme_active":     False,
-    "update_count":       0,
-    "auto_detect":        False,
-    "voice_triggered":    False,
-    "motion_triggered":   False,
-    "safe_check_pending": False,
-    "safe_check_start":   None,
-    "last_location":      None,
-    "panic_requested":    False,
-    "logs":               [],
-    "contacts":           list(DEFAULT_CONTACTS),
-}
-for k, v in defaults.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+# ---------- SESSION STATE INIT ----------
+for key, default in [
+    ("extreme_active", False),
+    ("update_count", 0),
+    ("last_sent", None),
+    ("tracking_locations", []),
+    ("panic_requested", False),
+    ("panic_key", 0),
+    ("voice_active", False),
+    ("voice_triggered", False),
+    ("voice_trigger_word", ""),
+    ("voice_trigger_key", 0),
+    ("voice_tracking_active", False),
+    ("voice_update_count", 0),
+    ("voice_tracking_locations", []),
+    ("voice_last_sent", None),
+    # Motion detection states
+    ("motion_monitoring", False),
+    ("motion_triggered", False),
+    ("motion_tracking_active", False),
+    ("motion_update_count", 0),
+    ("motion_tracking_locations", []),
+    ("motion_last_sent", None),
+    ("motion_listen_key", 0),
+]:
+    if key not in st.session_state:
+        st.session_state[key] = default
 
-# ==============================
-# HELPERS
-# ==============================
-def add_log(msg, level="info"):
-    ts    = datetime.now().strftime("%H:%M:%S")
-    icon  = {"info": "·", "ok": "✓", "warn": "⚠", "err": "✕"}.get(level, "·")
-    color = {"info": "#6b6b85", "ok": "#00e676", "warn": "#ff8c00", "err": "#ff1a1a"}.get(level, "#6b6b85")
-    st.session_state.logs.append(f'<span style="color:{color}">[{ts}] {icon} {msg}</span>')
-    if len(st.session_state.logs) > 60:
-        st.session_state.logs = st.session_state.logs[-60:]
+# ---------- READ SAVED CONTACT FROM localStorage ----------
+raw = streamlit_js_eval(js_expressions="localStorage.getItem('emergency_my_contacts')", key="read_my_contacts")
+my_contacts = []
+if raw and raw != "null":
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            my_contacts = [parsed]
+        elif isinstance(parsed, list):
+            my_contacts = parsed
+    except Exception:
+        my_contacts = []
 
+# ---------- HAVERSINE ----------
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371000
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi    = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
+    dphi, dlambda = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
+# ---------- FIND NEAREST POLICE ----------
 def find_police(lat, lon, radius=5000):
     query = f"""
     [out:json][timeout:10];
@@ -143,7 +91,7 @@ def find_police(lat, lon, radius=5000):
     try:
         res = requests.post(
             "https://overpass-api.de/api/interpreter",
-            data={"data": query}, timeout=20
+            data={"data": query}, timeout=25
         ).json()
         elements = res.get("elements", [])
         if not elements:
@@ -152,7 +100,7 @@ def find_police(lat, lon, radius=5000):
         for el in elements:
             plat = el.get("lat") or el.get("center", {}).get("lat")
             plon = el.get("lon") or el.get("center", {}).get("lon")
-            if not plat or not plon:
+            if plat is None or plon is None:
                 continue
             dist = haversine(lat, lon, plat, plon)
             if dist < best_dist:
@@ -160,826 +108,815 @@ def find_police(lat, lon, radius=5000):
                 name = el.get("tags", {}).get("name", "Police Station")
                 best = (plat, plon, name, best_dist)
         return best
-    except:
+    except Exception:
         return None
 
-def send_email(name, email, lat, lon, update_num=None, accuracy=None):
+# ---------- SEND EMAIL ----------
+def send_email(recipient_name, recipient_email, lat, lon, update_num=None, accuracy=None,
+               voice_triggered=False, trigger_word="", motion_triggered=False):
     maps_link = f"https://maps.google.com/?q={lat},{lon}"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    subject   = (
-        f"LIVE UPDATE #{update_num} - Emergency Alert"
-        if update_num else "🚨 Emergency Alert - Urgent"
-    )
-    msg = MIMEMultipart("alternative")
-    msg["Subject"]    = subject
-    msg["From"]       = f"{SENDER_NAME} <{SENDER_EMAIL}>"
-    msg["To"]         = email
-    msg["Date"]       = formatdate(localtime=True)
-    msg["Message-ID"] = make_msgid(domain="gmail.com")
-    body = f"""
-🚨 EMERGENCY ALERT
+    is_update = update_num is not None
 
-Dear {name},
+    if motion_triggered:
+        subject = f"📳 MOTION ALERT - Shaking/Running Detected - Emergency"
+        alert_type = "MOTION"
+    elif voice_triggered:
+        subject = f"🎙️ VOICE ALERT - Distress Word Detected - Emergency"
+        alert_type = "VOICE"
+    elif is_update:
+        subject = f"LIVE UPDATE #{update_num} - Emergency Alert - Urgent"
+        alert_type = "UPDATE"
+    else:
+        subject = "Emergency Alert - Urgent Assistance Required"
+        alert_type = "PANIC"
 
-Emergency panic button was activated.
+    acc_text = f"+-{accuracy:.0f}m" if accuracy else "N/A"
+    voice_note = f'\n⚠️ Triggered by voice: "{trigger_word}"\n' if voice_triggered else ""
+    motion_note = "\n⚠️ Triggered by device motion/shaking — person may be in distress!\n" if motion_triggered else ""
 
-📍 LOCATION:
-Latitude:  {lat}
-Longitude: {lon}
-Accuracy:  {accuracy if accuracy else 'N/A'} meters
+    plain = f"""{'📳 MOTION-TRIGGERED EMERGENCY ALERT' if motion_triggered else ('🎙️ VOICE-TRIGGERED EMERGENCY ALERT' if voice_triggered else ('LIVE TRACKING UPDATE #' + str(update_num) if is_update else 'EMERGENCY ALERT'))}
 
-🗺️ Google Maps: {maps_link}
+Dear {recipient_name},
 
-🕐 Time: {timestamp}
-{'📡 LIVE UPDATE #' + str(update_num) + ' — location updates every 30 seconds.' if update_num else ''}
+{'⚠️ MOTION ALERT: Rapid shaking or running motion was automatically detected on the device!' if motion_triggered else ('⚠️ VOICE DISTRESS DETECTION: The word "' + trigger_word + '" was detected. Auto-alert triggered!' if voice_triggered else ('This is a LIVE LOCATION UPDATE. The person is moving.' if is_update else 'Someone triggered the Emergency Panic Button.'))}
 
----
-Sent by Emergency Shield Auto-Detection System
+Call emergency services (999) immediately.
+{voice_note}{motion_note}
+Location: {lat:.6f}, {lon:.6f}
+Accuracy: {acc_text}
+Google Maps: {maps_link}
+Time: {timestamp}
 """
-    msg.attach(MIMEText(body, "plain"))
+
+    motion_banner = """
+        <div style="background:#7B3F00;color:white;padding:12px 15px;border-radius:6px;margin-bottom:15px;text-align:center;">
+            📳 <b>MOTION ALERT</b> — Rapid device shaking or running detected!
+        </div>""" if motion_triggered else ""
+
+    voice_banner = f"""
+        <div style="background:#4a0080;color:white;padding:12px 15px;border-radius:6px;margin-bottom:15px;text-align:center;">
+            🎙️ <b>VOICE ALERT</b> — Distress word detected: <b>"{trigger_word}"</b>
+        </div>""" if voice_triggered else ""
+
+    color = "#7B3F00" if motion_triggered else ("#4a0080" if voice_triggered else ("#8B0000" if is_update else "red"))
+    header_text = (
+        '📳 MOTION ALERT: Device Shaking Detected' if motion_triggered else
+        (f'🎙️ VOICE ALERT: "{trigger_word}"' if voice_triggered else
+         (f'LIVE UPDATE #{update_num}' if is_update else 'Emergency Alert'))
+    )
+
+    html = f"""
+    <html><body style="font-family:Arial,sans-serif;background:#f8f8f8;padding:20px;">
+    <div style="max-width:500px;margin:auto;background:white;border-radius:10px;
+                border-top:6px solid {color};padding:30px;
+                box-shadow:0 2px 8px rgba(0,0,0,0.1);">
+        {motion_banner}{voice_banner}
+        <h1 style="color:{color};text-align:center;">{header_text}</h1>
+        <p>Dear <b>{recipient_name}</b>,</p>
+        <p>
+            {'<b>⚠️ MOTION DISTRESS DETECTION ACTIVE</b><br>Rapid shaking or running motion was automatically detected on the device. Immediate attention required!' if motion_triggered else ('<b>⚠️ VOICE DISTRESS DETECTION ACTIVE</b><br>The word <b>"' + trigger_word + '"</b> was automatically detected by the emergency app. Immediate attention required!' if voice_triggered else ('<b>LIVE TRACKING ACTIVE</b> - Person is moving. Latest position below.' if is_update else 'Emergency Panic Button was activated.'))}
+            <br><br>Call emergency services (<b>999</b>) immediately.
+        </p>
+        <div style="background:#fff0f0;border-left:4px solid {color};
+                    padding:15px;border-radius:5px;margin:20px 0;">
+            <p style="margin:0;font-size:15px;">
+                Location:<br>
+                Lat: <code>{lat:.6f}</code><br>
+                Lon: <code>{lon:.6f}</code><br>
+                <small>GPS Accuracy: {acc_text}</small><br>
+                <small>Sent: {timestamp}</small>
+                {f'<br><small style="color:{color};font-weight:bold;">Update #{update_num} of ongoing tracking</small>' if is_update else ''}
+            </p>
+        </div>
+        <a href="{maps_link}" style="display:block;text-align:center;
+           background:{color};color:white;padding:14px 20px;
+           border-radius:8px;text-decoration:none;font-size:16px;font-weight:bold;margin-top:10px;">
+            Open Location on Google Maps
+        </a>
+    </div></body></html>
+    """
+
     try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = f"{SENDER_NAME} <{SENDER_EMAIL}>"
+        msg["To"] = recipient_email
+        msg["Reply-To"] = SENDER_EMAIL
+        msg["Date"] = formatdate(localtime=True)
+        msg["Message-ID"] = make_msgid(domain="gmail.com")
+        msg.attach(MIMEText(plain, "plain"))
+        msg.attach(MIMEText(html, "html"))
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(SENDER_EMAIL, SENDER_APP_PASSWORD)
-            server.sendmail(SENDER_EMAIL, email, msg.as_string())
-        return True
+            server.sendmail(SENDER_EMAIL, recipient_email, msg.as_string())
+        return True, ""
     except Exception as e:
-        add_log(f"Email error: {e}", "err")
-        return False
+        return False, str(e)
 
-def send_to_all(lat, lon, contacts, update_num=None, accuracy=None):
+def send_to_all(lat, lon, contacts, update_num=None, accuracy=None,
+                voice_triggered=False, trigger_word="", motion_triggered=False):
     results = []
     for c in contacts:
-        ok = send_email(c["name"], c["email"], lat, lon, update_num, accuracy)
-        results.append((c["name"], ok))
-        add_log(f"Email {'sent' if ok else 'FAILED'} → {c['name']}", "ok" if ok else "err")
+        success, error = send_email(
+            c["name"], c["email"], lat, lon,
+            update_num, accuracy, voice_triggered, trigger_word, motion_triggered
+        )
+        results.append({"name": c["name"], "email": c["email"], "success": success, "error": error})
     return results
 
-# ==============================
-# HIGH-ACCURACY GPS JS FUNCTION
-# ==============================
-# This JS snippet collects up to SAMPLES readings, keeps only those
-# with accuracy ≤ MAX_ACCURACY_M, then returns the best (lowest accuracy value).
-# Falls back to the best available reading if none meet the threshold.
-HIGH_ACCURACY_GPS_JS = """
-new Promise(resolve => {
-    const SAMPLES        = 5;       // number of readings to collect
-    const MAX_ACCURACY_M = 50;      // discard readings worse than 50 m
-    const SAMPLE_INTERVAL_MS = 800; // ms between samples
-    const TIMEOUT_MS     = 20000;   // total timeout
+# ---------- BUILD CONTACT LIST ----------
+all_contacts = list(DEFAULT_CONTACTS)
+for c in my_contacts:
+    if not any(x["email"].lower() == c["email"].lower() for x in all_contacts):
+        all_contacts.append(c)
 
-    const readings = [];
-    let done = false;
+# ---------- MY CONTACT SECTION ----------
+st.divider()
+st.subheader("📋 My Emergency Contacts")
 
-    const opts = {
-        enableHighAccuracy: true,
-        timeout: TIMEOUT_MS,
-        maximumAge: 0          // always fresh — never use cached position
-    };
+if my_contacts:
+    st.success(f"{len(my_contacts)} personal contact(s) saved on this device.")
+    for i, c in enumerate(my_contacts):
+        col_name, col_email, col_del = st.columns([2, 3, 1])
+        with col_name:
+            st.write(f"**{c['name']}**")
+        with col_email:
+            st.write(c["email"])
+        with col_del:
+            if st.button("🗑️ Remove", key=f"remove_{i}"):
+                updated = [x for j, x in enumerate(my_contacts) if j != i]
+                escaped = json.dumps(updated).replace("'", "\\'")
+                streamlit_js_eval(js_expressions=f"localStorage.setItem('emergency_my_contacts','{escaped}');true", key=f"del_contact_{i}")
+                st.info("Removed. Refresh to confirm.")
+else:
+    st.info("No personal contacts saved yet. Add contacts below.")
 
-    function finish() {
-        if (done) return;
-        done = true;
-        if (readings.length === 0) {
-            resolve("ERROR:No GPS readings obtained");
-            return;
-        }
-        // Sort by accuracy ascending (lower = better), pick the best
-        readings.sort((a, b) => a[2] - b[2]);
-        resolve(readings[0]);
-    }
+st.markdown("##### ➕ Add a Contact")
+with st.form("add_contact_form", clear_on_submit=True):
+    col_n, col_e = st.columns(2)
+    with col_n:
+        reg_name = st.text_input("Name", placeholder="e.g. Sarah")
+    with col_e:
+        reg_email = st.text_input("Email", placeholder="e.g. sarah@gmail.com")
+    if st.form_submit_button("Save Contact to This Device"):
+        if reg_name and reg_email:
+            if any(c["email"].lower() == reg_email.lower() for c in my_contacts):
+                st.warning("A contact with that email already exists.")
+            else:
+                updated = my_contacts + [{"name": reg_name, "email": reg_email}]
+                escaped = json.dumps(updated).replace("'", "\\'")
+                streamlit_js_eval(js_expressions=f"localStorage.setItem('emergency_my_contacts','{escaped}');true", key="save_new_contact")
+                st.success(f"Saved {reg_name}! Refresh to confirm.")
+        else:
+            st.warning("Please fill in both fields.")
 
-    function takeSample(remaining) {
-        if (done) return;
-        navigator.geolocation.getCurrentPosition(
-            pos => {
-                const acc = pos.coords.accuracy;
-                readings.push([
-                    pos.coords.latitude,
-                    pos.coords.longitude,
-                    Math.round(acc)
-                ]);
-                // If this reading is already very good, stop early
-                if (acc <= 10) { finish(); return; }
-                if (remaining > 1) {
-                    setTimeout(() => takeSample(remaining - 1), SAMPLE_INTERVAL_MS);
-                } else {
-                    finish();
-                }
-            },
-            err => {
-                // On error keep trying remaining samples unless it's a hard deny
-                if (err.code === 1) {
-                    done = true;
-                    resolve("ERROR:" + err.message);
-                } else if (remaining > 1) {
-                    setTimeout(() => takeSample(remaining - 1), SAMPLE_INTERVAL_MS);
-                } else {
-                    finish();
-                }
-            },
-            opts
-        );
-    }
+# ===================================================================
+# ---------- MOTION DETECTION SECTION ----------
+# ===================================================================
+st.divider()
+st.subheader("📳 Motion Detection (Shake / Running)")
 
-    // Failsafe: resolve with best available after total timeout
-    setTimeout(finish, TIMEOUT_MS);
-    takeSample(SAMPLES);
-})
-"""
+st.caption(
+    "Automatically detects rapid shaking or running motion via the device accelerometer. "
+    "Once triggered, location is sent every 30 seconds until you press STOP."
+)
 
-# ==============================
-# HEADER
-# ==============================
-st.markdown("""
-<div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;
-     border-bottom:1px solid rgba(255,255,255,0.08);padding-bottom:16px;">
-  <div style="width:40px;height:40px;background:#ff1a1a;
-       clip-path:polygon(50% 0%,100% 20%,100% 60%,50% 100%,0% 60%,0% 20%);
-       display:flex;align-items:center;justify-content:center;font-size:18px;">🛡</div>
-  <div>
-    <div style="font-family:'Bebas Neue',sans-serif;font-size:30px;letter-spacing:3px;">
-      EMERGENCY SHIELD
-    </div>
-    <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#6b6b85;letter-spacing:1px;">
-      AUTO-DANGER DETECTION SYSTEM
-    </div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
+# Sensitivity slider
+motion_threshold = st.slider(
+    "Shake sensitivity (lower = more sensitive)",
+    min_value=10, max_value=50, value=25, step=5,
+    help="Acceleration threshold (m/s²) to trigger the alert. Lower values trigger on lighter movement."
+)
+motion_confirm_count = st.slider(
+    "Confirm shakes needed to trigger",
+    min_value=2, max_value=8, value=3, step=1,
+    help="How many consecutive shakes above the threshold before alert fires."
+)
 
-# Set up background geolocation watcher for auto-detect features
-streamlit_js_eval(js_expressions="""
-(function() {
-    if (window._geoWatcherStarted) return true;
-    window._geoWatcherStarted = true;
-    window._lat      = null;
-    window._lon      = null;
-    window._acc      = null;
-    window._locError = '';
-    
-    if (!navigator.geolocation) {
-        window._locError = 'Geolocation not supported';
-        return false;
-    }
-
-    function onSuccess(pos) {
-        // Only update if this reading is better (lower accuracy number) than current
-        var newAcc = pos.coords.accuracy;
-        if (window._acc === null || newAcc < window._acc) {
-            window._lat = pos.coords.latitude;
-            window._lon = pos.coords.longitude;
-            window._acc = newAcc;
-        }
-        window._locError = '';
-    }
-
-    function onError(e) {
-        window._locError = e.message;
-    }
-
-    var opts = { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 };
-    navigator.geolocation.getCurrentPosition(onSuccess, onError, opts);
-    navigator.geolocation.watchPosition(onSuccess, onError, opts);
-    return true;
-})()
-""", key="setup_geo_watcher")
-
-# ==============================
-# SENSOR COMPONENT
-# ==============================
-SENSOR_HTML = """
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: #0a0a0f; font-family: 'IBM Plex Mono', monospace; }
-  #root { padding: 6px; }
-  .row  { display: flex; gap: 8px; margin-bottom: 8px; }
-  .box  {
-    flex: 1; background: #12121a;
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 8px; padding: 10px 8px; text-align: center;
-    transition: border-color 0.3s, box-shadow 0.3s;
-  }
-  .box.warn   { border-color: #ff8c00; box-shadow: 0 0 10px rgba(255,140,0,0.2); }
-  .box.danger {
-    border-color: #ff1a1a; box-shadow: 0 0 12px rgba(255,26,26,0.3);
-    animation: flash 0.5s ease-in-out;
-  }
-  @keyframes flash { 0%,100%{background:#12121a;} 50%{background:rgba(255,26,26,0.1);} }
-  .icon { font-size: 18px; margin-bottom: 4px; }
-  .lbl  { font-size: 9px; color: #6b6b85; text-transform: uppercase; margin-bottom: 2px; }
-  .val  { font-size: 11px; color: #e8e8f0; }
-  .bar-bg   { height: 3px; background: #1a1a26; border-radius: 2px; margin-top: 6px; overflow: hidden; }
-  .bar-fill { height: 100%; width: 0%; border-radius: 2px; background: #00e676;
-              transition: width 0.3s, background 0.3s; }
-  #waveCanvas { width: 100%; height: 44px; border-radius: 4px; background: #060610; display: block; }
-  #waveWrap   {
-    background: #12121a; border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 8px; padding: 8px; margin-bottom: 8px;
-  }
-  #waveLabel {
-    font-size: 9px; color: #6b6b85; text-transform: uppercase; margin-bottom: 4px;
-    display: flex; justify-content: space-between;
-  }
-  #transcriptBox { font-size: 10px; color: #6b6b85; margin-top: 5px; min-height: 14px; }
-  #micBtn {
-    width: 100%; padding: 9px; font-size: 11px; font-family: 'IBM Plex Mono', monospace;
-    background: #1a1a26; border: 1px solid rgba(255,255,255,0.15); color: #e8e8f0;
-    border-radius: 6px; cursor: pointer; margin-bottom: 8px; letter-spacing: 1px;
-    transition: background 0.2s;
-  }
-  #micBtn:hover { background: #222230; }
-  #micBtn.on    { border-color: #ff1a1a; color: #ff1a1a; background: rgba(255,26,26,0.08); }
-</style>
-
-<div id="root">
-  <button id="micBtn" onclick="toggleMic()">🎙 ENABLE MICROPHONE & MOTION DETECTION</button>
-  <div id="waveWrap">
-    <div id="waveLabel">
-      <span>AUDIO WAVEFORM</span>
-      <span id="micStatus" style="color:#6b6b85">MIC OFF</span>
-    </div>
-    <canvas id="waveCanvas" width="600" height="44"></canvas>
-    <div id="transcriptBox">Press button above to start monitoring...</div>
-  </div>
-  <div class="row">
-    <div class="box" id="voiceBox">
-      <div class="icon">🎙️</div>
-      <div class="lbl">Voice</div>
-      <div class="val" id="voiceVal">Idle</div>
-      <div class="bar-bg"><div class="bar-fill" id="voiceBar"></div></div>
-    </div>
-    <div class="box" id="motionBox">
-      <div class="icon">📳</div>
-      <div class="lbl">Motion</div>
-      <div class="val" id="motionVal">0.0 m/s²</div>
-      <div class="bar-bg"><div class="bar-fill" id="motionBar"></div></div>
-    </div>
-    <div class="box" id="safeBox">
-      <div class="icon">💬</div>
-      <div class="lbl">Status</div>
-      <div class="val" id="safeVal">Normal</div>
-      <div class="bar-bg"><div class="bar-fill" id="safeBar" style="background:#00e676;width:100%;"></div></div>
-    </div>
-  </div>
-</div>
-
-<script>
-// FIX 1: Expanded distress word list — single-syllable words like "help" are
-// easier for speech recognition to catch reliably.
-const DISTRESS_WORDS = [
-  "help", "tolong", "tulong",
-  "stop", "no", "dont", "don't",
-  "please", "please help",
-  "emergency", "danger",
-  "let go", "let me go", "leave me",
-  "fire",
-  "assault", "attack", "attacking",
-  "call police", "call 911", "call 999",
-  "somebody help", "someone help",
-  "save me", "i need help",
-  "get away", "go away"
-];
-const MOTION_THRESHOLD = 15;
-
-let audioCtx = null, analyser = null, waveData = null;
-let micOn = false, recognition = null;
-
-// FIX 2: Use postMessage to pass trigger data to the parent Streamlit window.
-// sessionStorage is sandboxed per-iframe and is NOT readable by the parent —
-// this was silently failing every time.
-function setTrigger(type, value) {
-    try {
-        // Write to our own sessionStorage (for local display)
-        sessionStorage.setItem('emergency_' + type, JSON.stringify({
-            value: value,
-            ts: Date.now()
-        }));
-    } catch(e) {}
-    // Also broadcast to parent window so Streamlit can read it
-    try {
-        window.parent.postMessage({
-            type: 'emergency_trigger',
-            triggerType: type,
-            value: value,
-            ts: Date.now()
-        }, '*');
-    } catch(e) {}
-    // FIX 3: Also write to parent sessionStorage directly if same origin
-    try {
-        window.parent.sessionStorage.setItem('emergency_' + type, JSON.stringify({
-            value: value,
-            ts: Date.now()
-        }));
-    } catch(e) {
-        // Cross-origin — postMessage above is the fallback
-    }
-}
-
-function setBox(id, barId, pct, level) {
-  document.getElementById(id + 'Box').className =
-    'box ' + (level === 'danger' ? 'danger' : level === 'warn' ? 'warn' : '');
-  var bar = document.getElementById(barId);
-  bar.style.width      = pct + '%';
-  bar.style.background = level === 'danger' ? '#ff1a1a'
-                       : level === 'warn'   ? '#ff8c00' : '#00e676';
-}
-
-async function toggleMic() {
-  if (micOn) { stopMic(); return; }
-  try {
-    var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 512;
-    audioCtx.createMediaStreamSource(stream).connect(analyser);
-    waveData = new Uint8Array(analyser.fftSize);
-    micOn    = true;
-    document.getElementById('micBtn').textContent = '⛔ STOP MONITORING';
-    document.getElementById('micBtn').classList.add('on');
-    document.getElementById('micStatus').textContent = 'MIC ON';
-    document.getElementById('micStatus').style.color = '#00e676';
-    drawWave();
-    startSpeech();
-    startMotion();
-  } catch(e) {
-    document.getElementById('transcriptBox').innerHTML =
-      '<span style="color:#ff8c00">⚠ Microphone denied — check browser permissions.</span>';
-  }
-}
-
-function stopMic() {
-  micOn = false;
-  if (audioCtx)    { audioCtx.close(); audioCtx = null; }
-  if (recognition) { recognition.stop(); recognition = null; }
-  document.getElementById('micBtn').textContent = '🎙 ENABLE MICROPHONE & MOTION DETECTION';
-  document.getElementById('micBtn').classList.remove('on');
-  document.getElementById('micStatus').textContent = 'MIC OFF';
-  document.getElementById('micStatus').style.color = '#6b6b85';
-}
-
-function drawWave() {
-  if (!micOn || !analyser) return;
-  var canvas = document.getElementById('waveCanvas');
-  var ctx    = canvas.getContext('2d');
-  var W = canvas.width, H = canvas.height;
-  requestAnimationFrame(drawWave);
-  analyser.getByteTimeDomainData(waveData);
-  var sum = 0;
-  for (var i = 0; i < waveData.length; i++) sum += Math.abs(waveData[i] - 128);
-  var amp = Math.min(100, (sum / waveData.length) * 5);
-  setBox('voice', 'voiceBar', amp,
-    amp > 65 ? 'danger' : amp > 35 ? 'warn' : '');
-  document.getElementById('voiceVal').textContent =
-    amp > 65 ? 'LOUD' : amp > 35 ? 'Active' : 'Low';
-  ctx.fillStyle = '#060610';
-  ctx.fillRect(0, 0, W, H);
-  ctx.strokeStyle = amp > 65 ? '#ff1a1a' : amp > 35 ? '#ff8c00' : '#00e676';
-  ctx.lineWidth   = 1.5;
-  ctx.beginPath();
-  var sw = W / waveData.length;
-  for (var i = 0; i < waveData.length; i++) {
-    var y = ((waveData[i] / 128.0) * H) / 2;
-    i === 0 ? ctx.moveTo(i * sw, y) : ctx.lineTo(i * sw, y);
-  }
-  ctx.stroke();
-}
-
-function startSpeech() {
-  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) {
-    document.getElementById('transcriptBox').innerHTML =
-      '<span style="color:#ff8c00">Speech recognition unavailable — use Chrome or Edge.</span>';
-    return;
-  }
-  recognition = new SR();
-  recognition.continuous     = true;
-  recognition.interimResults = true;
-  // FIX 4: Use device locale so the engine is already warm;
-  // 'en-US' can mis-transcribe accented speech. We try device lang first,
-  // fall back to en-US.
-  recognition.lang = navigator.language || 'en-US';
-
-  recognition.onresult = function(e) {
-    var t = '';
-    for (var i = e.resultIndex; i < e.results.length; i++)
-      t += e.results[i][0].transcript.toLowerCase();
-    document.getElementById('transcriptBox').textContent = 'Heard: "' + t + '"';
-
-    // FIX 5: Check every word individually so partial matches work
-    // e.g. "help me please" contains "help" — this works.
-    var found = null;
-    for (var w = 0; w < DISTRESS_WORDS.length; w++) {
-      if (t.indexOf(DISTRESS_WORDS[w]) !== -1) {
-        found = DISTRESS_WORDS[w];
-        break;
-      }
-    }
-
-    if (found) {
-      document.getElementById('transcriptBox').innerHTML =
-        '<span style="color:#ff1a1a;font-weight:600">⚠ DISTRESS: "' + found + '"</span>';
-      document.getElementById('voiceBox').className = 'box danger';
-      setTrigger('voice', found);
-    }
-  };
-
-  // FIX 6: Log ALL speech errors visibly so you can debug on device
-  recognition.onerror = function(e) {
-    var msg = e.error;
-    if (msg === 'no-speech') return; // normal silence, ignore
-    if (msg === 'not-allowed') {
-      document.getElementById('transcriptBox').innerHTML =
-        '<span style="color:#ff1a1a">⚠ Mic permission denied. Enable in browser settings.</span>';
-    } else if (msg === 'network') {
-      document.getElementById('transcriptBox').innerHTML =
-        '<span style="color:#ff8c00">⚠ Speech API needs internet connection.</span>';
-    } else {
-      document.getElementById('transcriptBox').innerHTML =
-        '<span style="color:#ff8c00">⚠ Speech error: ' + msg + '</span>';
-    }
-    console.warn('SpeechRecognition error:', msg);
-  };
-
-  recognition.onend = function() {
-    if (micOn) setTimeout(function() {
-      if (recognition) {
-        try { recognition.start(); } catch(e) {}
-      }
-    }, 300);
-  };
-
-  try {
-    recognition.start();
-  } catch(e) {
-    document.getElementById('transcriptBox').innerHTML =
-      '<span style="color:#ff8c00">⚠ Could not start speech: ' + e.message + '</span>';
-  }
-}
-
-function startMotion() {
-  var lastSpike = 0;
-  function listen() {
-    window.addEventListener('devicemotion', function(e) {
-      var a = e.acceleration;
-      if (!a) return;
-      var mag = Math.sqrt((a.x||0)*(a.x||0)+(a.y||0)*(a.y||0)+(a.z||0)*(a.z||0));
-      document.getElementById('motionVal').textContent = mag.toFixed(1) + ' m/s²';
-      var pct = Math.min(100, (mag / 25) * 100);
-      setBox('motion', 'motionBar', pct,
-        mag > MOTION_THRESHOLD ? 'danger' : mag > MOTION_THRESHOLD*0.6 ? 'warn' : '');
-      if (mag > MOTION_THRESHOLD && Date.now() - lastSpike > 5000) {
-        lastSpike = Date.now();
-        setTrigger('motion', mag);
-      }
-    });
-  }
-  if (typeof DeviceMotionEvent !== 'undefined' &&
-      typeof DeviceMotionEvent.requestPermission === 'function') {
-    DeviceMotionEvent.requestPermission()
-      .then(function(r) { if (r === 'granted') listen(); })
-      .catch(function() { listen(); });
-  } else if (typeof DeviceMotionEvent !== 'undefined') {
-    listen();
-  } else {
-    document.getElementById('motionVal').textContent = 'N/A';
-  }
-}
-</script>
-"""
-
-components.html(SENSOR_HTML, height=295, scrolling=False)
-
-# ── Listen for postMessage events from the sensor iframe ──────────────────────
-# The iframe's sessionStorage is sandboxed (not readable by parent).
-# We inject a listener on the PARENT window that catches postMessage from the
-# iframe and writes it into the PARENT sessionStorage, which Streamlit CAN read.
-streamlit_js_eval(js_expressions="""
-(function() {
-    if (window._triggerListenerStarted) return true;
-    window._triggerListenerStarted = true;
-    window.addEventListener('message', function(e) {
-        try {
-            var d = e.data;
-            if (d && d.type === 'emergency_trigger') {
-                sessionStorage.setItem('emergency_' + d.triggerType, JSON.stringify({
-                    value: d.value,
-                    ts: d.ts || Date.now()
-                }));
-            }
-        } catch(err) {}
-    });
-    return true;
-})()
-""", key="setup_trigger_listener")
-
-# Read auto-detect signals — now reliably written by the postMessage listener above
-voice_data_raw  = streamlit_js_eval(js_expressions="sessionStorage.getItem('emergency_voice')",  key="get_voice")
-motion_data_raw = streamlit_js_eval(js_expressions="sessionStorage.getItem('emergency_motion')", key="get_motion")
-
-# Parse triggers
-voice_triggered    = False
-last_distress_word = ""
-if voice_data_raw and voice_data_raw != "null":
-    try:
-        vdata = json.loads(voice_data_raw)
-        if (time.time() * 1000 - vdata.get("ts", 0)) < 20000:
-            voice_triggered    = True
-            last_distress_word = vdata.get("value", "")
-    except:
-        pass
-
-motion_triggered = False
-if motion_data_raw and motion_data_raw != "null":
-    try:
-        mdata = json.loads(motion_data_raw)
-        if (time.time() * 1000 - mdata.get("ts", 0)) < 10000:
-            motion_triggered = True
-    except:
-        pass
-
-# ==============================
-# AUTO-DETECT TOGGLE
-# ==============================
-st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
-col_tog, col_desc = st.columns([1, 3])
-with col_tog:
-    auto = st.toggle("AUTO-DETECT", value=st.session_state.auto_detect,
-                     key="auto_toggle_widget")
-with col_desc:
-    if auto:
-        st.markdown("""<div style='font-family:IBM Plex Mono,monospace;font-size:11px;
-            color:#ff8c00;padding-top:6px;'>
-            ⚡ ACTIVE — Monitoring voice + motion + response timeout</div>""",
-            unsafe_allow_html=True)
+motion_col1, motion_col2, motion_col3 = st.columns([3, 1, 1])
+with motion_col1:
+    if st.session_state.motion_tracking_active:
+        st.error("📳 MOTION ALERT ACTIVE — Live tracking ON")
+    elif st.session_state.motion_monitoring:
+        st.success("📳 Motion monitoring ACTIVE — watching accelerometer...")
     else:
-        st.markdown("""<div style='font-family:IBM Plex Mono,monospace;font-size:11px;
-            color:#6b6b85;padding-top:6px;'>
-            Off — Enable to auto-trigger extreme panic on danger signals</div>""",
-            unsafe_allow_html=True)
+        st.info("📴 Motion monitoring is OFF")
 
-if auto != st.session_state.auto_detect:
-    st.session_state.auto_detect = auto
-    add_log(f"Auto-detect {'enabled' if auto else 'disabled'}",
-            "ok" if auto else "warn")
-
-# ==============================
-# AUTO-DANGER LOGIC
-# ==============================
-if st.session_state.auto_detect and not st.session_state.extreme_active:
-
-    if voice_triggered and not st.session_state.voice_triggered:
-        st.session_state.voice_triggered = True
-        add_log(f'Distress word detected: "{last_distress_word}"', "err")
-
-    if motion_triggered and not st.session_state.motion_triggered:
-        st.session_state.motion_triggered = True
-        add_log("Sudden motion spike detected!", "err")
-
-    if (st.session_state.voice_triggered or st.session_state.motion_triggered) \
-            and not st.session_state.safe_check_pending:
-        st.session_state.safe_check_pending = True
-        st.session_state.safe_check_start   = time.time()
-        add_log("Safe check initiated — awaiting user response", "warn")
-
-    if st.session_state.safe_check_pending:
-        TIMEOUT   = 15
-        elapsed   = time.time() - st.session_state.safe_check_start
-        remaining = max(0, TIMEOUT - int(elapsed))
-        pct       = min(100, int((elapsed / TIMEOUT) * 100))
-        bar_color = "#ff1a1a" if pct > 66 else "#ff8c00"
-
-        st.markdown(f"""
-        <div style="background:#1a1000;border:2px solid #ff8c00;border-radius:10px;
-             padding:16px;margin-bottom:16px;">
-          <div style="font-family:'Bebas Neue',sans-serif;font-size:28px;
-               color:#ff8c00;letter-spacing:3px;">⚠ ARE YOU SAFE?</div>
-          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;
-               color:#aaa;margin-bottom:10px;">
-            Distress signals detected. Confirm safety or extreme panic activates in
-            <b style="color:#ff1a1a">{remaining}s</b>
-          </div>
-          <div style="background:#0a0a0f;border-radius:4px;height:6px;
-               overflow:hidden;margin-bottom:12px;">
-            <div style="height:100%;width:{pct}%;background:{bar_color};
-                 border-radius:4px;transition:width 1s;"></div>
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        sc1, sc2 = st.columns(2)
-        with sc1:
-            if st.button("✓ I'M SAFE", use_container_width=True,
-                         type="primary", key="im_safe_btn"):
-                st.session_state.safe_check_pending = False
-                st.session_state.voice_triggered    = False
-                st.session_state.motion_triggered   = False
-                streamlit_js_eval(js_expressions="""
-                    sessionStorage.removeItem('emergency_voice');
-                    sessionStorage.removeItem('emergency_motion');
-                    true
-                """, key="clear_triggers")
-                add_log("User confirmed SAFE — alert cancelled", "ok")
-                st.success("Marked as safe. Monitoring resumes.")
-                st.rerun()
-        with sc2:
-            if st.button("🚨 SEND HELP NOW", use_container_width=True,
-                         key="send_now_btn"):
-                st.session_state.safe_check_pending = False
-                st.session_state.voice_triggered    = False
-                st.session_state.motion_triggered   = False
-                st.session_state.extreme_active     = True
-                st.session_state.update_count       = 0
-                add_log("User manually triggered extreme panic", "err")
-                st.rerun()
-
-        if remaining <= 0:
-            st.session_state.safe_check_pending = False
-            st.session_state.voice_triggered    = False
-            st.session_state.motion_triggered   = False
-            st.session_state.extreme_active     = True
-            st.session_state.update_count       = 0
-            add_log("NO RESPONSE — AUTO-TRIGGERING EXTREME PANIC", "err")
+with motion_col2:
+    if not st.session_state.motion_monitoring and not st.session_state.motion_tracking_active:
+        if st.button("📳 Start Motion", use_container_width=True, type="primary"):
+            st.session_state.motion_monitoring = True
+            st.session_state.motion_triggered = False
+            st.session_state.motion_listen_key += 1
+            st.rerun()
+    elif st.session_state.motion_monitoring and not st.session_state.motion_tracking_active:
+        if st.button("📴 Stop Motion", use_container_width=True):
+            st.session_state.motion_monitoring = False
+            streamlit_js_eval(
+                js_expressions="window._motionListening = false; true",
+                key="stop_motion_listener"
+            )
             st.rerun()
 
-# ==============================
-# EXTREME PANIC BANNER
-# ==============================
-if st.session_state.extreme_active:
-    st.markdown(f"""
-    <div class="extreme-banner">
-      ⚠ EXTREME PANIC ACTIVE — LIVE TRACKING
-      <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:400;
-           color:rgba(255,255,255,0.6);margin-top:3px;">
-        Update #{st.session_state.update_count} · Sending location every 30 seconds
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-# ==============================
-# PANIC BUTTONS
-# ==============================
-c1, c2 = st.columns(2)
-
-with c1:
-    if st.button("🚨 PANIC", use_container_width=True, type="primary",
-                 disabled=st.session_state.extreme_active, key="panic_btn"):
-        st.session_state.panic_requested = True
-
-    if st.session_state.panic_requested:
-        st.info("📍 Getting best available location (collecting samples)...")
-        # ── HIGH-ACCURACY: collect up to 5 samples, return the best ──
-        loc = streamlit_js_eval(
-            js_expressions=HIGH_ACCURACY_GPS_JS,
-            key="panic_location_demand"
-        )
-
-        if loc is None:
-            st.info("📍 Waiting for location... Please check browser permissions.")
-            
-        elif isinstance(loc, list):
-            st.session_state.panic_requested = False
-            lat, lon = loc[0], loc[1]
-            acc = loc[2] if len(loc) > 2 else None
-
-            st.session_state.last_location = (lat, lon, acc)
-            add_log(f"Location: {lat:.5f}, {lon:.5f} (±{acc}m)", "ok")
-            
-            results = send_to_all(lat, lon, st.session_state.contacts, accuracy=acc)
-            for name, ok in results:
-                if ok: st.success(f"✓ Alert sent → {name}")
-                else:  st.error(f"✕ Failed → {name}")
-            
-            police = find_police(lat, lon)
-            if police:
-                plat, plon, pname, dist = police
-                st.info(f"📍 {pname} — {dist:.0f}m away")
-                st.link_button(
-                    "→ NAVIGATE TO POLICE STATION",
-                    f"https://www.google.com/maps/dir/?api=1&destination={plat},{plon}"
-                )
-                
-        elif isinstance(loc, str):
-            st.session_state.panic_requested = False
-            st.error(f"⚠ {loc}")
-            add_log(f"Location error: {loc}", "err")
-
-with c2:
-    if not st.session_state.extreme_active:
-        if st.button("⚡ EXTREME PANIC", use_container_width=True, key="extreme_btn"):
-            st.session_state.extreme_active = True
-            st.session_state.update_count   = 0
-            add_log("Extreme panic manually started", "err")
-            st.rerun()
-    else:
-        if st.button("⛔ STOP TRACKING", use_container_width=True, key="stop_btn"):
-            st.session_state.extreme_active = False
-            add_log("Extreme panic stopped by user", "warn")
+with motion_col3:
+    if st.session_state.motion_tracking_active:
+        if st.button("🛑 STOP MOTION TRACKING", use_container_width=True, type="primary"):
+            st.session_state.motion_tracking_active = False
+            st.session_state.motion_monitoring = False
+            st.session_state.motion_triggered = False
+            total = st.session_state.motion_update_count
+            st.session_state.motion_update_count = 0
+            st.session_state.motion_tracking_locations = []
+            st.success(f"Motion tracking stopped after {total} update(s).")
             st.rerun()
 
-# ==============================
-# EXTREME PANIC LOOP
-# ==============================
-if st.session_state.extreme_active:
+# ---------- INJECT MOTION DETECTION JS ----------
+if st.session_state.motion_monitoring and not st.session_state.motion_triggered and not st.session_state.motion_tracking_active:
+    motion_result = streamlit_js_eval(
+        js_expressions=f"""
+        new Promise((resolve) => {{
+            window._motionListening = true;
 
-    st.info("📍 Collecting high-accuracy location samples...")
-    # ── HIGH-ACCURACY: collect up to 5 samples, return the best ──
-    loc = streamlit_js_eval(
-        js_expressions=HIGH_ACCURACY_GPS_JS,
-        key=f"extreme_loc_{st.session_state.update_count}"
+            if (!window.DeviceMotionEvent) {{
+                resolve({{ error: 'NOT_SUPPORTED' }});
+                return;
+            }}
+
+            const THRESHOLD   = {motion_threshold};
+            const CONFIRM_REQ = {motion_confirm_count};
+            let shakeCount = 0;
+            let lastAcc    = null;
+            let resolved   = false;
+            let listenTimeout = null;
+
+            function onMotion(event) {{
+                if (!window._motionListening || resolved) return;
+
+                const acc = event.accelerationIncludingGravity;
+                if (!acc) return;
+
+                if (lastAcc) {{
+                    const delta = Math.abs(acc.x - lastAcc.x)
+                                + Math.abs(acc.y - lastAcc.y)
+                                + Math.abs(acc.z - lastAcc.z);
+                    if (delta > THRESHOLD) {{
+                        shakeCount++;
+                        if (shakeCount >= CONFIRM_REQ) {{
+                            resolved = true;
+                            window._motionListening = false;
+                            window.removeEventListener('devicemotion', onMotion);
+                            clearTimeout(listenTimeout);
+                            resolve({{ detected: true, delta: delta }});
+                            return;
+                        }}
+                    }} else {{
+                        // Decay shake count slowly so sustained normal movement doesn't latch
+                        if (shakeCount > 0) shakeCount = Math.max(0, shakeCount - 0.5);
+                    }}
+                }}
+                lastAcc = {{ x: acc.x, y: acc.y, z: acc.z }};
+            }}
+
+            // iOS 13+ requires permission
+            if (typeof DeviceMotionEvent.requestPermission === 'function') {{
+                DeviceMotionEvent.requestPermission()
+                    .then(state => {{
+                        if (state === 'granted') {{
+                            window.addEventListener('devicemotion', onMotion);
+                        }} else {{
+                            resolve({{ error: 'PERMISSION_DENIED' }});
+                        }}
+                    }})
+                    .catch(() => resolve({{ error: 'PERMISSION_ERROR' }}));
+            }} else {{
+                window.addEventListener('devicemotion', onMotion);
+            }}
+
+            // Resolve after 30 seconds if no shake (will re-listen)
+            listenTimeout = setTimeout(() => {{
+                if (!resolved) {{
+                    resolved = true;
+                    window.removeEventListener('devicemotion', onMotion);
+                    resolve({{ timeout: true }});
+                }}
+            }}, 30000);
+        }})
+        """,
+        key=f"motion_listen_{st.session_state.motion_listen_key}"
     )
 
-    if loc is None:
-        st.info("📍 Fetching live location update...")
-        
-    elif isinstance(loc, list):
-        e_lat, e_lon = loc[0], loc[1]
-        e_acc = loc[2] if len(loc) > 2 else None
-        
-        st.session_state.update_count += 1
-        st.session_state.last_location = (e_lat, e_lon, e_acc)
-        
-        send_to_all(e_lat, e_lon, st.session_state.contacts,
-                    update_num=st.session_state.update_count, accuracy=e_acc)
-        add_log(f"Update #{st.session_state.update_count}: {e_lat:.5f}, {e_lon:.5f} (±{e_acc}m)", "ok")
-        
-        countdown_ph = st.empty()
-        for i in range(30, 0, -1):
-            if not st.session_state.extreme_active:
-                st.stop()
-            countdown_ph.markdown(f"""
-            <div style="background:#12121a;border:1px solid rgba(255,255,255,0.08);
-                 border-radius:8px;padding:10px 14px;font-family:'IBM Plex Mono',monospace;
-                 font-size:12px;color:#6b6b85;text-align:center;">
-              Next location update in
-              <span style="color:#ff1a1a;font-size:18px;font-family:'Bebas Neue',sans-serif;">
-                {i}s
-              </span>
-            </div>""", unsafe_allow_html=True)
-            time.sleep(1)
-        st.rerun()
-        
-    elif isinstance(loc, str):
-        add_log(f"Location error during tracking: {loc}", "err")
-        time.sleep(5)
-        st.rerun()
-
-# ==============================
-# ACTIVITY LOG
-# ==============================
-st.markdown("""
-<div style='font-family:IBM Plex Mono,monospace;font-size:10px;color:#6b6b85;
-     letter-spacing:1px;text-transform:uppercase;margin:8px 0 6px;'>
-  Activity Log
-</div>""", unsafe_allow_html=True)
-log_entries = "<br>".join(reversed(st.session_state.logs[-20:]))
-st.markdown(f"<div class='log-box'>{log_entries}</div>", unsafe_allow_html=True)
-
-# ==============================
-# CONTACTS MANAGEMENT
-# ==============================
-with st.expander("👥 Alert Contacts", expanded=False):
-    for i, c in enumerate(st.session_state.contacts):
-        cn, ce, cd = st.columns([2, 3, 1])
-        with cn:
-            st.markdown(f"<span style='font-size:13px;font-weight:600;'>{c['name']}</span>",
-                        unsafe_allow_html=True)
-        with ce:
-            st.markdown(f"<span style='font-family:IBM Plex Mono,monospace;font-size:11px;"
-                        f"color:#6b6b85;'>{c['email']}</span>", unsafe_allow_html=True)
-        with cd:
-            if i > 0 and st.button("✕", key=f"del_{i}"):
-                st.session_state.contacts.pop(i)
-                add_log(f"Removed contact: {c['name']}", "warn")
+    if motion_result is not None:
+        if isinstance(motion_result, dict):
+            if motion_result.get("detected"):
+                st.session_state.motion_triggered = True
+                st.session_state.motion_tracking_active = True
+                st.session_state.motion_monitoring = False
+                st.session_state.motion_update_count = 0
+                st.session_state.motion_tracking_locations = []
+                st.session_state.motion_listen_key += 1
+                st.rerun()
+            elif motion_result.get("error") == "NOT_SUPPORTED":
+                st.error("❌ Your device/browser doesn't support motion detection. Try Chrome on Android.")
+                st.session_state.motion_monitoring = False
+            elif motion_result.get("error") == "PERMISSION_DENIED":
+                st.error("❌ Motion permission denied. On iPhone, go to Settings > Safari > Motion & Orientation Access.")
+                st.session_state.motion_monitoring = False
+            elif motion_result.get("error"):
+                st.warning(f"Motion sensor error: {motion_result.get('error')}. Retrying...")
+                st.session_state.motion_listen_key += 1
+                time.sleep(1)
+                st.rerun()
+            elif motion_result.get("timeout"):
+                # No shake in 30 s — re-listen silently
+                st.session_state.motion_listen_key += 1
                 st.rerun()
 
+# ===================================================================
+# ---------- MOTION LIVE TRACKING LOOP ----------
+# ===================================================================
+if st.session_state.motion_tracking_active:
     st.divider()
-    an1, an2, an3 = st.columns([2, 3, 1])
-    with an1:
-        new_name = st.text_input("Name", placeholder="Name",
-                                 label_visibility="collapsed", key="new_name")
-    with an2:
-        new_email = st.text_input("Email", placeholder="email@example.com",
-                                  label_visibility="collapsed", key="new_email")
-    with an3:
-        if st.button("Add", key="add_contact_btn"):
-            if new_name and new_email and "@" in new_email:
-                if not any(c["email"].lower() == new_email.lower()
-                           for c in st.session_state.contacts):
-                    st.session_state.contacts.append(
-                        {"name": new_name, "email": new_email})
-                    add_log(f"Contact added: {new_name}", "ok")
-                    st.rerun()
-                else:
-                    st.warning("Contact already exists.")
-            else:
-                st.error("Enter a valid name and email.")
+    st.error("📳 MOTION DISTRESS DETECTED — LIVE TRACKING ACTIVE")
+    st.warning("Location is being sent every 30 seconds. Press 🛑 STOP MOTION TRACKING above to end.")
 
-# ==============================
-# FOOTER
-# ==============================
-st.markdown("""
-<div style="text-align:center;font-family:'IBM Plex Mono',monospace;font-size:9px;
-     color:#6b6b85;margin-top:24px;letter-spacing:1px;">
-  EMERGENCY SHIELD v2.4 · HIGH-ACCURACY GPS · SET GMAIL APP PASSWORD BEFORE USE
-</div>
-""", unsafe_allow_html=True)
+    m_location_box = st.empty()
+    m_result_box   = st.empty()
+    m_trail_box    = st.empty()
+
+    m_fresh_loc = streamlit_js_eval(
+        js_expressions="""
+        new Promise(resolve => {
+            navigator.geolocation.getCurrentPosition(
+                p => resolve([p.coords.latitude, p.coords.longitude, p.coords.accuracy]),
+                () => resolve(null),
+                { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+            );
+        })""",
+        key=f"motion_xloc_{st.session_state.motion_update_count}"
+    )
+
+    if m_fresh_loc:
+        m_lat      = m_fresh_loc[0]
+        m_lon      = m_fresh_loc[1]
+        m_accuracy = m_fresh_loc[2] if len(m_fresh_loc) > 2 else None
+        m_acc_str  = f"+-{m_accuracy:.0f}m" if m_accuracy else "unknown"
+        m_count    = st.session_state.motion_update_count + 1
+        m_ts       = datetime.now().strftime("%H:%M:%S")
+
+        m_location_box.info(
+            f"📳 Motion Update #{m_count} at {m_ts} | "
+            f"{m_lat:.6f}, {m_lon:.6f} | accuracy {m_acc_str}"
+        )
+
+        if m_count == 1:
+            with st.spinner("Finding nearest police..."):
+                police = find_police(m_lat, m_lon) or find_police(m_lat, m_lon, 15000)
+            if police:
+                plat, plon, pname, pdist = police
+                st.success(f"🚔 {pname} — {pdist:.0f}m away")
+                st.link_button("GO TO POLICE NOW", f"https://www.google.com/maps/dir/?api=1&destination={plat},{plon}")
+
+        with m_result_box.container():
+            with st.spinner(f"Sending motion update #{m_count}..."):
+                results = send_to_all(
+                    m_lat, m_lon, all_contacts,
+                    update_num=m_count,
+                    accuracy=m_accuracy,
+                    motion_triggered=True
+                )
+            for r in results:
+                if r["success"]:
+                    st.success(f"✅ Motion Update #{m_count} sent to {r['name']}")
+                else:
+                    st.error(f"❌ Failed - {r['name']}: {r['error']}")
+
+        st.session_state.motion_tracking_locations.append({
+            "update": m_count, "lat": m_lat, "lon": m_lon,
+            "accuracy": m_acc_str, "time": m_ts
+        })
+        st.session_state.motion_update_count = m_count
+        st.session_state.motion_last_sent    = m_ts
+
+        with m_trail_box.expander(
+            f"📍 Motion location trail ({len(st.session_state.motion_tracking_locations)} updates)",
+            expanded=False
+        ):
+            for entry in reversed(st.session_state.motion_tracking_locations):
+                st.markdown(
+                    f"**#{entry['update']}** at {entry['time']} - "
+                    f"`{entry['lat']:.5f}, {entry['lon']:.5f}` ({entry['accuracy']}) "
+                    f"[Maps](https://maps.google.com/?q={entry['lat']},{entry['lon']})"
+                )
+
+        m_countdown = st.empty()
+        for remaining in range(30, 0, -1):
+            if not st.session_state.motion_tracking_active:
+                m_countdown.empty()
+                st.stop()
+            m_countdown.info(f"📳 Next motion update in {remaining}s... | Last sent: {m_ts}")
+            time.sleep(1)
+        m_countdown.empty()
+        st.rerun()
+
+    else:
+        st.error("Could not get GPS location. Make sure location permission is granted.")
+        m_retry = st.empty()
+        for remaining in range(10, 0, -1):
+            if not st.session_state.motion_tracking_active:
+                m_retry.empty()
+                st.stop()
+            m_retry.warning(f"Retrying in {remaining} seconds...")
+            time.sleep(1)
+        m_retry.empty()
+        if st.session_state.motion_tracking_active:
+            st.rerun()
+
+# ===================================================================
+# ---------- VOICE RECOGNITION SECTION ----------
+# ===================================================================
+st.divider()
+st.subheader("🎙️ Voice Distress Detection")
+
+keywords_display = ", ".join([f'"{k}"' for k in DISTRESS_KEYWORDS])
+st.caption(f"Listening for: {keywords_display}")
+
+voice_col1, voice_col2, voice_col3 = st.columns([3, 1, 1])
+with voice_col1:
+    if st.session_state.voice_tracking_active:
+        st.error(f'🎙️ VOICE ALERT ACTIVE — Live tracking ON (triggered by: "{st.session_state.voice_trigger_word}")')
+    elif st.session_state.voice_active:
+        st.success("🎙️ Voice monitoring ACTIVE — listening for distress words...")
+    else:
+        st.info("🔇 Voice monitoring is OFF")
+
+with voice_col2:
+    if not st.session_state.voice_active and not st.session_state.voice_tracking_active:
+        if st.button("🎙️ Start Listening", use_container_width=True, type="primary"):
+            st.session_state.voice_active = True
+            st.session_state.voice_triggered = False
+            st.session_state.voice_trigger_word = ""
+            st.session_state.voice_trigger_key += 1
+            st.rerun()
+    elif st.session_state.voice_active and not st.session_state.voice_tracking_active:
+        if st.button("🔇 Stop Listening", use_container_width=True):
+            st.session_state.voice_active = False
+            streamlit_js_eval(
+                js_expressions="window._emergencyRecognition && window._emergencyRecognition.stop(); true",
+                key="stop_voice"
+            )
+            st.rerun()
+
+with voice_col3:
+    if st.session_state.voice_tracking_active:
+        if st.button("🛑 STOP VOICE TRACKING", use_container_width=True, type="primary"):
+            st.session_state.voice_tracking_active = False
+            st.session_state.voice_active = False
+            st.session_state.voice_triggered = False
+            total = st.session_state.voice_update_count
+            st.session_state.voice_update_count = 0
+            st.session_state.voice_tracking_locations = []
+            st.success(f"Voice tracking stopped after {total} update(s).")
+            st.rerun()
+
+# ---------- INJECT VOICE RECOGNITION JS ----------
+if st.session_state.voice_active and not st.session_state.voice_triggered and not st.session_state.voice_tracking_active:
+    keywords_js = json.dumps(DISTRESS_KEYWORDS)
+
+    voice_result = streamlit_js_eval(
+        js_expressions=f"""
+        new Promise((resolve) => {{
+            if (window._emergencyRecognition) {{
+                window._emergencyRecognition.stop();
+                window._emergencyRecognition = null;
+            }}
+
+            const keywords = {keywords_js};
+
+            if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {{
+                resolve({{ error: 'NOT_SUPPORTED' }});
+                return;
+            }}
+
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            const recognition = new SpeechRecognition();
+            window._emergencyRecognition = recognition;
+
+            recognition.continuous      = true;
+            recognition.interimResults  = true;
+            recognition.lang            = 'en-US';
+            recognition.maxAlternatives = 3;
+
+            let resolved = false;
+
+            recognition.onresult = (event) => {{
+                for (let i = event.resultIndex; i < event.results.length; i++) {{
+                    for (let a = 0; a < event.results[i].length; a++) {{
+                        const transcript = event.results[i][a].transcript.toLowerCase().trim();
+                        for (const kw of keywords) {{
+                            if (transcript.includes(kw.toLowerCase())) {{
+                                if (!resolved) {{
+                                    resolved = true;
+                                    recognition.stop();
+                                    resolve({{ detected: true, word: kw, transcript: transcript }});
+                                }}
+                                return;
+                            }}
+                        }}
+                    }}
+                }}
+            }};
+
+            recognition.onerror = (event) => {{
+                if (!resolved) {{
+                    resolved = true;
+                    resolve({{ error: event.error }});
+                }}
+            }};
+
+            recognition.onend = () => {{
+                if (!resolved) {{
+                    resolved = true;
+                    resolve({{ ended: true }});
+                }}
+            }};
+
+            recognition.start();
+        }})
+        """,
+        key=f"voice_listen_{st.session_state.voice_trigger_key}"
+    )
+
+    if voice_result is not None:
+        if isinstance(voice_result, dict):
+            if voice_result.get("detected"):
+                trigger_word = voice_result.get("word", "unknown")
+                st.session_state.voice_triggered = True
+                st.session_state.voice_trigger_word = trigger_word
+                st.session_state.voice_tracking_active = True
+                st.session_state.voice_active = False
+                st.session_state.voice_update_count = 0
+                st.session_state.voice_tracking_locations = []
+                st.session_state.voice_trigger_key += 1
+                st.rerun()
+            elif voice_result.get("error") == "NOT_SUPPORTED":
+                st.error("❌ Your browser doesn't support Speech Recognition. Please use Chrome or Edge.")
+                st.session_state.voice_active = False
+            elif voice_result.get("error"):
+                error_msg = voice_result.get("error", "")
+                if error_msg not in ("aborted", "no-speech"):
+                    st.warning(f"Mic error: {error_msg}. Retrying...")
+                st.session_state.voice_trigger_key += 1
+                time.sleep(1)
+                st.rerun()
+            elif voice_result.get("ended"):
+                st.session_state.voice_trigger_key += 1
+                time.sleep(0.5)
+                st.rerun()
+
+# ===================================================================
+# ---------- VOICE LIVE TRACKING LOOP ----------
+# ===================================================================
+if st.session_state.voice_tracking_active:
+    st.divider()
+    trigger_word = st.session_state.voice_trigger_word
+    st.error(f'🎙️ VOICE DISTRESS DETECTED: "{trigger_word.upper()}" — LIVE TRACKING ACTIVE')
+    st.warning("Location is being sent every 30 seconds. Press 🛑 STOP VOICE TRACKING above to end.")
+
+    v_location_box = st.empty()
+    v_result_box   = st.empty()
+    v_trail_box    = st.empty()
+
+    v_fresh_loc = streamlit_js_eval(
+        js_expressions="""
+        new Promise(resolve => {
+            navigator.geolocation.getCurrentPosition(
+                p => resolve([p.coords.latitude, p.coords.longitude, p.coords.accuracy]),
+                () => resolve(null),
+                { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+            );
+        })""",
+        key=f"voice_xloc_{st.session_state.voice_update_count}"
+    )
+
+    if v_fresh_loc:
+        v_lat      = v_fresh_loc[0]
+        v_lon      = v_fresh_loc[1]
+        v_accuracy = v_fresh_loc[2] if len(v_fresh_loc) > 2 else None
+        v_acc_str  = f"+-{v_accuracy:.0f}m" if v_accuracy else "unknown"
+        v_count    = st.session_state.voice_update_count + 1
+        v_ts       = datetime.now().strftime("%H:%M:%S")
+
+        v_location_box.info(
+            f"🎙️ Voice Update #{v_count} at {v_ts} | "
+            f"{v_lat:.6f}, {v_lon:.6f} | accuracy {v_acc_str}"
+        )
+
+        if v_count == 1:
+            with st.spinner("Finding nearest police..."):
+                police = find_police(v_lat, v_lon) or find_police(v_lat, v_lon, 15000)
+            if police:
+                plat, plon, pname, pdist = police
+                st.success(f"🚔 {pname} — {pdist:.0f}m away")
+                st.link_button("GO TO POLICE NOW", f"https://www.google.com/maps/dir/?api=1&destination={plat},{plon}")
+
+        with v_result_box.container():
+            with st.spinner(f"Sending voice update #{v_count}..."):
+                results = send_to_all(
+                    v_lat, v_lon, all_contacts,
+                    update_num=v_count,
+                    accuracy=v_accuracy,
+                    voice_triggered=True,
+                    trigger_word=trigger_word
+                )
+            for r in results:
+                if r["success"]:
+                    st.success(f"✅ Voice Update #{v_count} sent to {r['name']}")
+                else:
+                    st.error(f"❌ Failed - {r['name']}: {r['error']}")
+
+        st.session_state.voice_tracking_locations.append({
+            "update": v_count, "lat": v_lat, "lon": v_lon,
+            "accuracy": v_acc_str, "time": v_ts
+        })
+        st.session_state.voice_update_count = v_count
+        st.session_state.voice_last_sent    = v_ts
+
+        with v_trail_box.expander(f"📍 Voice location trail ({len(st.session_state.voice_tracking_locations)} updates)", expanded=False):
+            for entry in reversed(st.session_state.voice_tracking_locations):
+                st.markdown(
+                    f"**#{entry['update']}** at {entry['time']} - "
+                    f"`{entry['lat']:.5f}, {entry['lon']:.5f}` ({entry['accuracy']}) "
+                    f"[Maps](https://maps.google.com/?q={entry['lat']},{entry['lon']})"
+                )
+
+        v_countdown = st.empty()
+        for remaining in range(30, 0, -1):
+            if not st.session_state.voice_tracking_active:
+                v_countdown.empty()
+                st.stop()
+            v_countdown.info(f"🎙️ Next voice update in {remaining}s... | Last sent: {v_ts}")
+            time.sleep(1)
+        v_countdown.empty()
+        st.rerun()
+
+    else:
+        st.error("Could not get GPS location. Make sure location permission is granted.")
+        v_retry = st.empty()
+        for remaining in range(10, 0, -1):
+            if not st.session_state.voice_tracking_active:
+                v_retry.empty()
+                st.stop()
+            v_retry.warning(f"Retrying in {remaining} seconds...")
+            time.sleep(1)
+        v_retry.empty()
+        if st.session_state.voice_tracking_active:
+            st.rerun()
+
+# ===================================================================
+# ---------- PANIC BUTTONS ----------
+# ===================================================================
+st.divider()
+st.caption(f"Alert will be sent to {len(all_contacts)} contact(s).")
+
+col1, col2 = st.columns(2)
+
+# ---- STANDARD PANIC ----
+with col1:
+    if st.button("PANIC", use_container_width=True, type="primary", disabled=st.session_state.extreme_active):
+        st.session_state.panic_requested = True
+        st.session_state.panic_key += 1
+
+    if st.session_state.panic_requested:
+        st.info("Locating... Please wait.")
+        loc = streamlit_js_eval(
+            js_expressions="""
+            new Promise(resolve => {
+                navigator.geolocation.getCurrentPosition(
+                    p => resolve([p.coords.latitude, p.coords.longitude]),
+                    () => resolve("ERROR")
+                );
+            })""",
+            key=f"panic_location_{st.session_state.panic_key}"
+        )
+
+        if loc == "ERROR":
+            st.error("Location unavailable - allow location access and refresh.")
+            st.session_state.panic_requested = False
+        elif loc is not None:
+            lat, lon = loc
+            st.success(f"Location: {lat:.5f}, {lon:.5f}")
+            results = send_to_all(lat, lon, all_contacts)
+            for r in results:
+                if r["success"]:
+                    st.success(f"Sent to {r['name']}")
+                else:
+                    st.error(f"Failed - {r['name']}: {r['error']}")
+            with st.spinner("Finding nearest police..."):
+                police = find_police(lat, lon) or find_police(lat, lon, 15000)
+            if police:
+                plat, plon, name, dist = police
+                st.success(f"{name} - {dist:.0f}m away")
+                st.link_button("GO TO POLICE NOW", f"https://www.google.com/maps/dir/?api=1&destination={plat},{plon}")
+            else:
+                st.error("No police station found nearby.")
+
+            st.session_state.panic_requested = False
+
+# ---- EXTREME PANIC TOGGLE ----
+with col2:
+    if not st.session_state.extreme_active:
+        if st.button("EXTREME PANIC - Live Tracking", use_container_width=True):
+            st.session_state.extreme_active = True
+            st.session_state.update_count = 0
+            st.session_state.tracking_locations = []
+            st.rerun()
+    else:
+        if st.button("STOP TRACKING", use_container_width=True, type="primary"):
+            st.session_state.extreme_active = False
+            st.success(f"Tracking stopped after {st.session_state.update_count} update(s).")
+            st.rerun()
+
+# ===================================================================
+# ---------- EXTREME PANIC LIVE TRACKING ----------
+# ===================================================================
+if st.session_state.extreme_active:
+    st.divider()
+    st.error("EXTREME PANIC ACTIVE - LIVE TRACKING ON")
+    st.warning("Location sent every 30 seconds. Press STOP TRACKING above to end.")
+
+    location_box = st.empty()
+    result_box   = st.empty()
+    trail_box    = st.empty()
+
+    fresh_loc = streamlit_js_eval(
+        js_expressions="""
+        new Promise(resolve => {
+            navigator.geolocation.getCurrentPosition(
+                p => resolve([p.coords.latitude, p.coords.longitude, p.coords.accuracy]),
+                () => resolve(null),
+                { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+            );
+        })""",
+        key=f"xloc_{st.session_state.update_count}"
+    )
+
+    if fresh_loc:
+        lat      = fresh_loc[0]
+        lon      = fresh_loc[1]
+        accuracy = fresh_loc[2] if len(fresh_loc) > 2 else None
+        acc_str  = f"+-{accuracy:.0f}m" if accuracy else "unknown"
+        count    = st.session_state.update_count + 1
+        ts       = datetime.now().strftime("%H:%M:%S")
+
+        location_box.info(
+            f"Update #{count} at {ts} | "
+            f"{lat:.6f}, {lon:.6f} | accuracy {acc_str}"
+        )
+
+        with result_box.container():
+            with st.spinner(f"Sending update #{count}..."):
+                results = send_to_all(lat, lon, all_contacts, update_num=count, accuracy=accuracy)
+            for r in results:
+                if r["success"]:
+                    st.success(f"Update #{count} sent to {r['name']}")
+                else:
+                    st.error(f"Failed - {r['name']}: {r['error']}")
+
+        st.session_state.tracking_locations.append({
+            "update": count, "lat": lat, "lon": lon,
+            "accuracy": acc_str, "time": ts
+        })
+        st.session_state.update_count = count
+        st.session_state.last_sent    = ts
+
+        with trail_box.expander(f"Location trail ({len(st.session_state.tracking_locations)} updates)", expanded=False):
+            for entry in reversed(st.session_state.tracking_locations):
+                st.markdown(
+                    f"**#{entry['update']}** at {entry['time']} - "
+                    f"`{entry['lat']:.5f}, {entry['lon']:.5f}` ({entry['accuracy']}) "
+                    f"[Maps](https://maps.google.com/?q={entry['lat']},{entry['lon']})"
+                )
+
+        countdown = st.empty()
+        for remaining in range(30, 0, -1):
+            if not st.session_state.extreme_active:
+                countdown.empty()
+                st.stop()
+            countdown.info(f"Next update in {remaining} seconds... | Last sent: {ts}")
+            time.sleep(1)
+        countdown.empty()
+        st.rerun()
+
+    else:
+        st.error("Could not get GPS location. Make sure location permission is granted.")
+        retry_box = st.empty()
+        for remaining in range(10, 0, -1):
+            if not st.session_state.extreme_active:
+                retry_box.empty()
+                st.stop()
+            retry_box.warning(f"Retrying in {remaining} seconds...")
+            time.sleep(1)
+        retry_box.empty()
+        if st.session_state.extreme_active:
+            st.rerun()
